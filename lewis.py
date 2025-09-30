@@ -1,4 +1,5 @@
 # MicroPython 1.9.4 - Full-Featured Version for CASIO fx-9750GIII
+# Includes fixes for expanded octets and unique atom naming.
 
 VSEPR = {
     (1,0): ("AX","Linear","180","s"),
@@ -20,7 +21,7 @@ VSEPR = {
 def show_vsepr_info(structure, central_atom):
     X = len(structure['bonds'])
     E = structure['lone_pairs'].get(central_atom, 0) // 2
-    print("\n--- VSEPR Prediction ---")
+    print("\n--VSEPR Prediction--")
     print("Central atom: " + str(central_atom[:-1]))
     print("Bonded atoms (X): " + str(X))
     print("Lone pairs (E): " + str(E))
@@ -110,11 +111,15 @@ class LewisStructureCreator:
         for s, cnt in self.atom_counts.items():
             num = cnt - 1 if s == c_symbol else cnt
             for _ in range(num): terms.append(s)
+        
         self.central_atom = c_symbol + "0"
-        counts = {}; self.terminal_atoms = []
+        self.terminal_atoms = []
+        temp_counts = {}
         for s in terms:
-            idx = counts.get(s, 0)
-            self.terminal_atoms.append(s + str(idx)); counts[s] = idx + 1
+            idx = temp_counts.get(s, 1) 
+            self.terminal_atoms.append(s + str(idx))
+            temp_counts[s] = idx + 1
+        
         nb = len(self.terminal_atoms)
         e_in_b = nb * 2
         if e_in_b > self.total_valence_electrons: return
@@ -129,29 +134,27 @@ class LewisStructureCreator:
         lone_pairs[self.central_atom] += lp_electrons
         self._satisfy_central_octet(bonds, lone_pairs)
 
-    def _satisfy_central_octet(self, initial_bonds, initial_lone_pairs):
+    def _satisfy_central_octet(self, bonds, lone_pairs):
+        self._store_if_valid(bonds, lone_pairs)
+
         central_symbol = self.central_atom[:-1]
-        bonds_electrons = sum(initial_bonds.values()) * 2
-        central_electrons = bonds_electrons + initial_lone_pairs[self.central_atom]
+        bonds_electrons = sum(bonds.values()) * 2
+        central_electrons = bonds_electrons + lone_pairs.get(self.central_atom, 0)
+        
         is_period_2 = central_symbol in ['B', 'C', 'N', 'O', 'F']
-        octet_satisfied = central_electrons >= 8
-        if octet_satisfied or not is_period_2 or central_symbol in ('B', 'Be'):
-            self._store_if_valid(initial_bonds, initial_lone_pairs)
-        if central_electrons < 8:
-            donatable = [t for t in self.terminal_atoms if initial_lone_pairs.get(t, 0) >= 2]
-            bonds_needed = (8 - central_electrons) // 2
-            for i in range(1, len(donatable) + 1):
-                if i > bonds_needed: continue
-                for combo in combinations(donatable, i):
-                    new_bonds = initial_bonds.copy(); new_lp = initial_lone_pairs.copy()
-                    possible = True
-                    for atom in combo:
-                        if new_lp[atom] >= 2:
-                            new_bonds[atom] += 1; new_lp[atom] -= 2
-                        else:
-                            possible = False; break
-                    if possible:
-                        self._satisfy_central_octet(new_bonds, new_lp)
+        if is_period_2 and central_electrons >= 8:
+            return
+
+        for terminal_atom in self.terminal_atoms:
+            if lone_pairs.get(terminal_atom, 0) >= 2 and bonds.get(terminal_atom, 1) < 3:
+                
+                new_bonds = bonds.copy()
+                new_lone_pairs = lone_pairs.copy()
+
+                new_bonds[terminal_atom] += 1
+                new_lone_pairs[terminal_atom] -= 2
+                
+                self._satisfy_central_octet(new_bonds, new_lone_pairs)
 
     def _store_if_valid(self, bonds, lone_pairs):
         structure = {'bonds': bonds, 'lone_pairs': lone_pairs}
@@ -171,16 +174,49 @@ class LewisStructureCreator:
     def get_optimal_structures(self):
         self._generate_structures()
         if not self.all_valid_structures: return None, []
-        scores = [sum([abs(c) for c in s['formal_charges'].values()]) for s in self.all_valid_structures]
-        min_score = min(scores)
-        
-        # --- FIX: Replaced list comprehension that used enumerate ---
-        optimal = []
-        for i in range(len(self.all_valid_structures)):
-            if scores[i] == min_score:
-                optimal.append(self.all_valid_structures[i])
 
-        return optimal[0], optimal[1:]
+        min_score = 100 
+        for s in self.all_valid_structures:
+            score = sum([abs(c) for c in s['formal_charges'].values()])
+            if score < min_score:
+                min_score = score
+
+        best_score_structures = []
+        for s in self.all_valid_structures:
+            score = sum([abs(c) for c in s['formal_charges'].values()])
+            if score == min_score:
+                best_score_structures.append(s)
+
+        if len(best_score_structures) <= 1:
+            return best_score_structures[0], []
+
+        final_optimal_structures = []
+        max_electronegativity_for_neg_charge = -1.0 
+
+        for s in best_score_structures:
+            min_en_for_this_structure = 10.0 
+            has_negative_charge = False
+            for atom, charge in s['formal_charges'].items():
+                if charge < 0:
+                    has_negative_charge = True
+                    symbol = atom[:-1] if atom[-1].isdigit() else atom
+                    en = self.ELECTRONEGATIVITY[symbol]
+                    if en < min_en_for_this_structure:
+                        min_en_for_this_structure = en
+            
+            if not has_negative_charge:
+                 min_en_for_this_structure = 10.0 
+
+            if min_en_for_this_structure > max_electronegativity_for_neg_charge:
+                max_electronegativity_for_neg_charge = min_en_for_this_structure
+                final_optimal_structures = [s]
+            elif min_en_for_this_structure == max_electronegativity_for_neg_charge:
+                final_optimal_structures.append(s)
+
+        if not final_optimal_structures:
+            return best_score_structures[0], best_score_structures[1:]
+
+        return final_optimal_structures[0], final_optimal_structures[1:]
 
     def format_structure(self, s, title):
         out = ["--- " + str(title) + " ---", "\n[Structure]"]
@@ -214,9 +250,9 @@ def main():
         opt, resonances = creator.get_optimal_structures()
         
         if opt:
-            print("\n" + "="*25)
+            print("\n" + "="*21)
             print(creator.format_structure(opt, "Most Optimal Structure"))
-            print("="*25)
+            print("="*21)
             show_vsepr_info(opt, creator.central_atom)
 
             if resonances:
@@ -233,3 +269,5 @@ def main():
         print("\nAn unexpected error occurred: " + str(e))
 
 main()
+print("\n=-=-=-=-=-=-=-=-=-=-=\n")
+    
